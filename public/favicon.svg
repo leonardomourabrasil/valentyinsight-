@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Valente Insight">
+  <defs>
+    <style>
+      .navy{fill:#0b2a3c}
+      .green{fill:#2ecc71}
+      .stroke{fill:none;stroke:#0b2a3c;stroke-width:20;stroke-linejoin:round}
+    </style>
+  </defs>
+  <!-- Transparent background for favicon -->
+  <!-- Outer diamond -->
+  <rect x="96" y="96" width="320" height="320" rx="16" transform="rotate(45 256 256)" class="green"/>
+  <!-- Inner diamond outline -->
+  <rect x="156" y="156" width="200" height="200" rx="12" transform="rotate(45 256 256)" class="stroke"/>
+  <!-- Eyes -->
+  <polygon class="navy" points="198,256 230,230 230,282"/>
+  <polygon class="navy" points="314,256 282,230 282,282"/>
+  <!-- Nose (down arrow) -->
+  <path class="navy" d="M256 220 v60 l18 -20 h-36 z"/>
+  <!-- Mouth (chevron) -->
+  <path class="navy" d="M224 308 l32 -12 l32 12 l-8 10 l-24 -8 l-24 8 z"/>
+</svg>
