@@ -55,7 +55,7 @@ export function RadarChart({ data, className }: RadarChartProps) {
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <ChartContainer config={chartConfig} className="h-80">
+        <ChartContainer config={chartConfig} className="h-64 md:h-80">
           <ResponsiveContainer width="100%" height="100%">
             <RechartsRadar data={radarData} margin={{ top: 20, right: 30, bottom: 20, left: 30 }}>
               <PolarGrid 

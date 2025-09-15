@@ -12,7 +12,7 @@ interface DashboardLayoutProps {
 
 export function DashboardLayout({ children, onExport, hasData = false, onReset }: DashboardLayoutProps) {
   return (
-    <div className="min-h-screen bg-gradient-to-br from-background via-background to-secondary/20">
+    <div className="min-h-screen overflow-x-hidden bg-gradient-to-br from-background via-background to-secondary/20">
       {/* Header */}
       <header className="border-b bg-card/50 backdrop-blur-sm sticky top-0 z-50">
         <div className="container mx-auto px-4 py-4">
@@ -33,7 +33,7 @@ export function DashboardLayout({ children, onExport, hasData = false, onReset }
               </div>
             </div>
             
-            <div className="flex items-center space-x-2">
+            <div className="flex flex-wrap gap-2 justify-end">
               {hasData && (
                 <>
                   <Button 
