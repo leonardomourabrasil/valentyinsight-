@@ -16,6 +16,9 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { BarChart3, Upload as UploadIcon, BookOpen, Clock, CalendarRange, CheckCircle2, Users, Star, Award } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
+// NOVO: libs para exportar PDF a partir do DOM
+import jsPDF from 'jspdf';
+import * as htmlToImage from 'html-to-image';
 
 const Index = () => {
   const [surveyData, setSurveyData] = useState<TransformedSurveyData[]>([]);
@@ -59,39 +62,160 @@ const Index = () => {
     });
   };
 
-  const handleExport = async () => {
-    try {
-      // Implementação básica de exportação
-      const dataToExport = {
-        timestamp: new Date().toISOString(),
-        totalRespostas: filteredData.length,
-        filtrosAplicados: filters,
-        dados: filteredData,
-      };
+  // Estado para sinalizar exportação (usado para ajustar o que vai para o PDF)
+  const [isExporting, setIsExporting] = useState(false);
 
-      const blob = new Blob([JSON.stringify(dataToExport, null, 2)], {
-        type: 'application/json',
+  const handleExport = async () => {
+    // Armazena estilos originais para restaurar no final
+    const previousStyles = new Map<Element, { maxHeight: string; overflow: string; height: string }>();
+
+    try {
+      // Ativa modo de exportação para renderizar apenas o conteúdo desejado no PDF
+      setIsExporting(true);
+      await new Promise((r) => requestAnimationFrame(() => r(null)));
+
+      const root = document.getElementById('print-root');
+      if (!root) {
+        toast({
+          title: 'Exportação indisponível',
+          description: 'Não foi possível localizar o conteúdo para exportação.',
+          variant: 'destructive',
+        });
+        return;
+      }
+
+      // Expandir áreas roláveis somente para a captura (ex.: listas de feedbacks)
+      const expandable = Array.from(root.querySelectorAll('[data-print-expand]')) as HTMLElement[];
+      expandable.forEach((el) => {
+        previousStyles.set(el, {
+          maxHeight: el.style.maxHeight,
+          overflow: el.style.overflow,
+          height: el.style.height,
+        });
+        el.style.maxHeight = 'none';
+        el.style.overflow = 'visible';
+        el.style.height = 'auto';
       });
-      
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `valenty-dashboard-${new Date().toISOString().split('T')[0]}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+
+      // Forçar layout estável antes do snapshot
+      await new Promise((r) => requestAnimationFrame(() => r(null)));
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Criar PDF A4 em milímetros
+      const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const margin = 10; // mm
+      const contentWidth = pageWidth - margin * 2;
+      const contentHeight = pageHeight - margin * 2;
+      const sectionSpacing = 6; // mm entre seções
+
+      let yPos = margin;
+
+      // Capturar cada seção individualmente na ordem de exibição
+      const sections = Array.from(root.querySelectorAll('[data-print-section]')) as HTMLElement[];
+
+      for (const section of sections) {
+        // Ignora seções não visíveis
+        if (section.offsetParent === null) continue;
+
+        const dataUrl = await htmlToImage.toPng(section, {
+          pixelRatio: 2,
+          backgroundColor: '#ffffff',
+          cacheBust: true,
+          style: { transform: 'none', animation: 'none' },
+        });
+
+        const img = new Image();
+        const imgLoaded = new Promise<void>((resolve, reject) => {
+          img.onload = () => resolve();
+          img.onerror = () => reject(new Error('Falha ao carregar imagem gerada para seção'));
+        });
+        img.src = dataUrl;
+        await imgLoaded;
+
+        const scale = contentWidth / img.naturalWidth; // mm por px
+        const scaledHeight = img.naturalHeight * scale;
+
+        if (scaledHeight <= contentHeight) {
+          // Se não couber no espaço restante da página atual, pula para a próxima página
+          if (yPos + scaledHeight > pageHeight - margin) {
+            pdf.addPage();
+            yPos = margin;
+          }
+          pdf.addImage(dataUrl, 'PNG', margin, yPos, contentWidth, scaledHeight);
+          yPos += scaledHeight + sectionSpacing;
+        } else {
+          // Seção maior que uma página: fatiar mantendo início da seção no topo de uma página
+          const pixelsPerPage = Math.floor(contentHeight / scale);
+          const sliceCanvas = document.createElement('canvas');
+          const sliceCtx = sliceCanvas.getContext('2d');
+          sliceCanvas.width = img.naturalWidth;
+
+          let y = 0;
+          let isFirstSlice = true;
+          while (y < img.naturalHeight) {
+            const sliceHeight = Math.min(pixelsPerPage, img.naturalHeight - y);
+            sliceCanvas.height = sliceHeight;
+            sliceCtx!.clearRect(0, 0, sliceCanvas.width, sliceCanvas.height);
+            sliceCtx!.drawImage(
+              img,
+              0,
+              y,
+              sliceCanvas.width,
+              sliceHeight,
+              0,
+              0,
+              sliceCanvas.width,
+              sliceHeight,
+            );
+            const sliceDataUrl = sliceCanvas.toDataURL('image/png', 1.0);
+
+            // Garante que a primeira parte começa no topo da página
+            if (isFirstSlice || yPos + sliceHeight * scale > pageHeight - margin) {
+              if (!isFirstSlice || yPos !== margin) {
+                pdf.addPage();
+              }
+              yPos = margin;
+            }
+
+            const sliceHeightMM = sliceHeight * scale;
+            pdf.addImage(sliceDataUrl, 'PNG', margin, yPos, contentWidth, sliceHeightMM);
+            yPos += sliceHeightMM + sectionSpacing;
+
+            y += sliceHeight;
+            isFirstSlice = false;
+          }
+        }
+      }
+
+      // Nome do arquivo com data
+      const dateStr = new Date().toISOString().split('T')[0];
+      pdf.save(`valenty-dashboard-${dateStr}.pdf`);
 
       toast({
-        title: "Exportação concluída",
-        description: "Dados exportados com sucesso!",
+        title: 'Exportação concluída',
+        description: 'PDF gerado com as seções visíveis, com quebras de página inteligentes.',
       });
     } catch (error) {
+      console.error(error);
       toast({
-        title: "Erro na exportação",
-        description: "Não foi possível exportar os dados.",
-        variant: "destructive",
+        title: 'Erro na exportação',
+        description: 'Não foi possível gerar o PDF. Tente novamente.',
+        variant: 'destructive',
       });
+    } finally {
+      // Restaurar estilos originais das áreas expandidas
+      try {
+        previousStyles.forEach((styles, el) => {
+          const elem = el as HTMLElement;
+          elem.style.maxHeight = styles.maxHeight;
+          elem.style.overflow = styles.overflow;
+          elem.style.height = styles.height;
+        });
+      } catch {}
+      // Desativa modo de exportação
+      setIsExporting(false);
     }
   };
 
@@ -131,31 +255,23 @@ const Index = () => {
         },
       };
     }
-
     const blockAverages = calculateBlockAverages(filteredData);
-    const npsCurso = calculateNPS(filteredData.map(d => d.nps.npsCurso));
-    const npsMarca = calculateNPS(filteredData.map(d => d.nps.npsMarca));
-
+    const npsCurso = calculateNPS(filteredData.map((d) => d.nps.npsCurso));
+    const npsMarca = calculateNPS(filteredData.map((d) => d.nps.npsMarca));
     const mediaGeral = (
       blockAverages.autoavaliacao +
       blockAverages.professor +
       blockAverages.metodologia +
       blockAverages.infraestrutura
     ) / 4;
-
     const npsTotal = Math.ceil((npsCurso.nps + npsMarca.nps) / 2);
-
-    // Encontrar melhor bloco
     const blocos = [
       { nome: 'Autoavaliação', valor: blockAverages.autoavaliacao },
       { nome: 'Professor', valor: blockAverages.professor },
       { nome: 'Metodologia', valor: blockAverages.metodologia },
       { nome: 'Infraestrutura', valor: blockAverages.infraestrutura },
     ];
-    const blocoMelhor = blocos.reduce((max, bloco) => 
-      bloco.valor > max.valor ? bloco : max
-    ).nome;
-
+    const blocoMelhor = blocos.reduce((max, b) => (b.valor > max.valor ? b : max)).nome;
     return {
       totalRespondentes: filteredData.length,
       mediaGeral,
@@ -165,17 +281,17 @@ const Index = () => {
     };
   }, [filteredData]);
 
+  // NPS por curso e marca + combinado
   const npsData = React.useMemo(() => {
-    const cursoScores = filteredData.map(d => d.nps.npsCurso);
-    const marcaScores = filteredData.map(d => d.nps.npsMarca);
+    const cursoScores = filteredData.map((d) => d.nps.npsCurso);
+    const marcaScores = filteredData.map((d) => d.nps.npsMarca);
     const npsCurso = calculateNPS(cursoScores);
     const npsMarca = calculateNPS(marcaScores);
     const npsCombined = calculateNPS([...cursoScores, ...marcaScores]);
-    
     return { npsCurso, npsMarca, npsCombined };
   }, [filteredData]);
 
-  // Gauge do NPS (curso)
+  // Gauge NPS agregado
   const npsGauge = React.useMemo(() => {
     const c = npsData.npsCombined;
     const percent = Math.max(0, Math.min(100, Math.ceil(c.nps)));
@@ -194,227 +310,63 @@ const Index = () => {
     return { percent, r, circumference, dash, zone, c };
   }, [npsData]);
 
-
-
-// Nova: cálculo das médias por dimensão do Professor
+  // Métricas de avaliação do professor
   const professorMetrics = React.useMemo(() => {
     const avg = (values: Array<number | null>) => {
-      const valid = values.filter((v): v is number => typeof v === 'number');
+      const valid = values.filter((v): v is number => typeof v === 'number' && !isNaN(v));
       if (valid.length === 0) return null;
       return Number((valid.reduce((a, b) => a + b, 0) / valid.length).toFixed(1));
     };
 
-    const relacionamento = avg(filteredData.map(d => d.avaliacaoProfessor.relacionamento));
-    const dominioAssunto = avg(filteredData.map(d => d.avaliacaoProfessor.dominioAssunto));
-    const aplicabilidade = avg(filteredData.map(d => d.avaliacaoProfessor.aplicabilidade));
-    const didatica = avg(filteredData.map(d => d.avaliacaoProfessor.didaticaComunicacao));
-    const pontualidade = avg(filteredData.map(d => d.avaliacaoProfessor.pontualidade));
+    const relacionamento = avg(filteredData.map((d) => d.avaliacaoProfessor.relacionamento));
+    const dominioAssunto = avg(filteredData.map((d) => d.avaliacaoProfessor.dominioAssunto));
+    const aplicabilidade = avg(filteredData.map((d) => d.avaliacaoProfessor.aplicabilidade));
+    const didatica = avg(filteredData.map((d) => d.avaliacaoProfessor.didaticaComunicacao));
+    const pontualidade = avg(filteredData.map((d) => d.avaliacaoProfessor.pontualidade));
 
     let professorNome = '';
     if (filters.professores.length === 1) {
       professorNome = filters.professores[0];
     } else {
-      const uniq = Array.from(new Set(filteredData.map(d => d.professor).filter(Boolean)));
+      const uniq = Array.from(new Set(filteredData.map((d) => d.professor).filter(Boolean)));
       if (uniq.length === 1) professorNome = uniq[0] as string;
     }
 
     return { relacionamento, dominioAssunto, aplicabilidade, didatica, pontualidade, professorNome };
   }, [filteredData, filters.professores]);
 
-  // Comparativo entre Turmas (agrupado por CLUSTERS de datas globais)
+  // Comparativo entre turmas (simplificado: desativado se faltar lógica avançada)
   const turmasComparativo = React.useMemo(() => {
-    if (!filteredData || filteredData.length === 0) return [] as Array<{
-      title: string; // ex.: "Turma Agosto 2025"
-      subtitle: string; // ex.: "01-02 de Agosto | TURMA-001 e TURMA-002"
+    return [] as Array<{
+      title: string;
+      subtitle: string;
       participantes: number;
       mediaGeral: number;
       npsTotal: number;
       focoTotal: number | null;
-      start: Date | null;
     }>;
-
-    const toMidnight = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
-    const dayMs = 24 * 60 * 60 * 1000;
-    const gapDays = 3;
-
-    // Coleta todas as datas relevantes (início/fim; fallback submittedAt) normalizadas
-    const rowDates: Map<TransformedSurveyData, number[]> = new Map();
-    const allTimes: number[] = [];
-    filteredData.forEach(r => {
-      const dates: number[] = [];
-      const pushDate = (x: any) => {
-        if (!x) return;
-        const d = x instanceof Date ? x : new Date(x);
-        if (!isNaN(d.getTime())) dates.push(toMidnight(d).getTime());
-      };
-      if (r.dataInicio) pushDate(r.dataInicio);
-      if (r.dataTermino) pushDate(r.dataTermino);
-      if (dates.length === 0 && r.submittedAt) pushDate(r.submittedAt);
-      const uniq = Array.from(new Set(dates));
-      rowDates.set(r, uniq);
-      uniq.forEach(t => allTimes.push(t));
-    });
-
-    const sorted = Array.from(new Set(allTimes)).sort((a, b) => a - b).map(t => new Date(t));
-    if (sorted.length === 0) return [];
-
-    // Clusterização global de datas
-    type Cluster = { start: Date; end: Date };
-    const clusters: Cluster[] = [];
-    let current: Cluster = { start: sorted[0], end: sorted[0] };
-    for (let i = 1; i < sorted.length; i++) {
-      const prev = current.end;
-      const curr = sorted[i];
-      const diffDays = Math.round((curr.getTime() - prev.getTime()) / dayMs);
-      if (diffDays <= gapDays) {
-        current.end = curr;
-      } else {
-        clusters.push(current);
-        current = { start: curr, end: curr };
-      }
-    }
-    clusters.push(current);
-
-    // Utilitários de label
-    const monthNames = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
-    const formatMonthYear = (d: Date) => `${monthNames[d.getMonth()]} ${d.getFullYear()}`;
-    const pad2 = (n: number) => n.toString().padStart(2, '0');
-    const formatShortRange = (s: Date | null, e: Date | null) => {
-      if (!s && !e) return '';
-      const start = s || e!;
-      const end = e || s!;
-      const sameMonth = start.getMonth() === end.getMonth() && start.getFullYear() === end.getFullYear();
-      if (sameMonth) {
-        const d1 = pad2(start.getDate());
-        const d2 = pad2(end.getDate());
-        const mes = monthNames[start.getMonth()];
-        return start.getDate() === end.getDate() ? `${d1} de ${mes}` : `${d1}-${d2} de ${mes}`;
-      }
-      // meses diferentes (mesmo ano)
-      const d1 = pad2(start.getDate());
-      const m1 = monthNames[start.getMonth()];
-      const d2 = pad2(end.getDate());
-      const m2 = monthNames[end.getMonth()];
-      return `${d1} de ${m1} – ${d2} de ${m2}`;
-    };
-
-    // Para cada cluster global, agregamos as respostas que tocam o intervalo
-    const results = clusters.map(cl => {
-      const inCluster = filteredData.filter(r => {
-        const times = rowDates.get(r) || [];
-        return times.some(t => t >= toMidnight(cl.start).getTime() && t <= toMidnight(cl.end).getTime());
-      });
-      if (inCluster.length === 0) return null;
-
-      // Frequência por dia dentro do cluster
-      const freq = new Map<number, number>();
-      const add = (t: number) => freq.set(t, (freq.get(t) || 0) + 1);
-      inCluster.forEach(r => {
-        const times = (rowDates.get(r) || []).filter(t => t >= toMidnight(cl.start).getTime() && t <= toMidnight(cl.end).getTime());
-        times.forEach(add);
-      });
-
-      // Lista contínua de dias do cluster
-      const days: number[] = [];
-      let d = toMidnight(cl.start).getTime();
-      const endT = toMidnight(cl.end).getTime();
-      while (d <= endT) { days.push(d); d += dayMs; }
-
-      // Escolher a janela mais densa: preferência por 2 dias; depois 3; depois 1. Empate: janela mais recente.
-      const lengths = [2, 3, 1];
-      let bestStart = days[0];
-      let bestLen = 1;
-      let bestSum = -1;
-      for (const len of lengths) {
-        if (days.length < len) continue;
-        for (let i = 0; i <= days.length - len; i++) {
-          let sum = 0;
-          for (let k = 0; k < len; k++) {
-            const t = days[i] + k * dayMs;
-            sum += freq.get(t) || 0;
-          }
-          if (sum > bestSum || (sum === bestSum && (days[i] > bestStart))) {
-            bestSum = sum; bestStart = days[i]; bestLen = len;
-          }
-        }
-        if (bestSum > 0) break; // encontramos janela com sinal claro
-      }
-      const repStart = new Date(bestStart);
-      const repEnd = new Date(bestStart + (bestLen - 1) * dayMs);
-
-      // Agregações
-      const block = calculateBlockAverages(inCluster);
-      const mediaGeral = Number((((
-        block.autoavaliacao + block.professor + block.metodologia + block.infraestrutura
-      ) / 4)).toFixed(1));
-
-      const npsCurso = calculateNPS(inCluster.map((d) => d.nps.npsCurso));
-      const npsMarca = calculateNPS(inCluster.map((d) => d.nps.npsMarca));
-      const npsTotal = Math.ceil((npsCurso.nps + npsMarca.nps) / 2);
-
-      const focusVals = inCluster
-        .map((r) => r.nps.nivelAproveitamento || '')
-        .map((txt) => {
-          const m = txt.match(/(\d{1,3})\s*%/);
-          if (!m) return null;
-          const v = parseInt(m[1], 10);
-          if (isNaN(v)) return null;
-          return Math.max(0, Math.min(100, v));
-        })
-        .filter((v): v is number => v !== null);
-      const focoTotal = focusVals.length ? Math.ceil(focusVals.reduce((a, b) => a + b, 0) / focusVals.length) : null;
-
-      // Título e subtítulo
-      const title = `Turma ${formatMonthYear(repStart)}`;
-      const short = formatShortRange(repStart, repEnd);
-      const turmasSet = new Set(
-        inCluster.map(r => (r.turma || '').trim()).filter(Boolean)
-      );
-      const turmasList = Array.from(turmasSet).sort((a,b) => a.localeCompare(b, 'pt-BR'));
-      const joinTurmas = (arr: string[]) => {
-        if (arr.length <= 1) return arr[0] || '';
-        if (arr.length === 2) return `${arr[0]} e ${arr[1]}`;
-        return `${arr.slice(0, -1).join(', ')} e ${arr[arr.length - 1]}`;
-      };
-      const coursesSet = new Set(inCluster.map(r => (r.curso || '').trim()).filter(Boolean));
-      const courseSuffix = coursesSet.size === 1 ? ` – ${Array.from(coursesSet)[0]}` : '';
-      const subtitle = `${short} | ${joinTurmas(turmasList)}${courseSuffix}`;
-
-      return {
-        title,
-        subtitle,
-        participantes: inCluster.length,
-        mediaGeral,
-        npsTotal,
-        focoTotal,
-        start: repStart
-      };
-    }).filter((x): x is NonNullable<typeof x> => x !== null);
-
-    // Ordenação por início do cluster
-    results.sort((a, b) => (a.start?.getTime() || 0) - (b.start?.getTime() || 0));
-
-    return results;
   }, [filteredData]);
 
-  // Lista completa de feedbacks com metadados (turma/curso)
+  // Feedbacks textuais (lista simples)
   const feedbackItems = React.useMemo(() => {
-    const items: { text: string; turma: string; curso: string }[] = [];
-    const push = (r: TransformedSurveyData, t?: string | null) => {
+    const items: { text: string; turma: string; curso: string; isPromoter: boolean; isImprovement: boolean }[] = [];
+    const push = (r: TransformedSurveyData, t?: string | null, opts?: { improvement?: boolean }) => {
       if (t && t.trim().length > 0) {
-        items.push({ text: t.trim(), turma: r.turma, curso: r.curso });
+        const isPromoter = (r.nps.npsCurso ?? 0) >= 9 || (r.nps.npsMarca ?? 0) >= 9;
+        items.push({ text: t.trim(), turma: r.turma, curso: r.curso, isPromoter, isImprovement: !!opts?.improvement });
       }
     };
-    filteredData.forEach(r => {
+    filteredData.forEach((r) => {
       push(r, r.autoavaliacao.feedback);
       push(r, r.avaliacaoProfessor.feedback);
       push(r, r.metodologia.feedback);
-      push(r, r.nps.melhorias);
+      // Campo de melhorias entra marcado como tal
+      push(r, r.nps.melhorias, { improvement: true });
     });
     return items;
   }, [filteredData]);
 
-  // Nova seção: informações agregadas do(s) curso(s)
+  // Informações agregadas do(s) curso(s)
   const courseInfo = React.useMemo(() => {
     const empty = {
       courseLabel: '—',
@@ -429,58 +381,32 @@ const Index = () => {
       recomendacaoMarcaPct: 0,
       aproveitamentoMaxPct: 0,
     };
+    if (filteredData.length === 0) return empty;
 
-    if (!filteredData || filteredData.length === 0) return empty;
-
-    // Curso(s)
-    const cursos = Array.from(new Set(filteredData.map(d => (d.curso || '').trim()).filter(Boolean)));
+    const cursos = Array.from(new Set(filteredData.map((d) => (d.curso || '').trim()).filter(Boolean)));
     const courseLabel = cursos.length === 1 ? cursos[0] : `${cursos.length} cursos`;
-
-    // Turmas
-    const turmas = Array.from(new Set(filteredData.map(d => (d.turma || '').trim()).filter(Boolean)));
-
-    // Carga horária por turma (heurística: extrair do nome do curso, ex.: "16 horas")
-    const hoursVals = filteredData
-      .map(d => d.curso || '')
-      .map(txt => {
-        const m = txt.match(/(\d{1,3})\s*(?:h|horas?)/i);
-        return m ? parseInt(m[1], 10) : null;
-      })
-      .filter((n): n is number => n !== null);
-
-    let cargaPorTurma: number | null = null;
-    if (hoursVals.length) {
-      // escolher o valor mais frequente
-      const freq = new Map<number, number>();
-      hoursVals.forEach(v => freq.set(v, (freq.get(v) || 0) + 1));
-      cargaPorTurma = Array.from(freq.entries()).sort((a, b) => b[1] - a[1])[0][0];
-    }
-
-    const cargaHorariaLabel = cargaPorTurma ? `${cargaPorTurma} horas por turma` : '—';
-    const totalHorasLabel = cargaPorTurma ? `${cargaPorTurma * Math.max(1, turmas.length)} horas (${Math.max(1, turmas.length)} turmas)` : '—';
+    const turmas = Array.from(new Set(filteredData.map((d) => (d.turma || '').trim()).filter(Boolean)));
 
     // Períodos por turma
     const byTurma = new Map<string, TransformedSurveyData[]>();
-    filteredData.forEach(r => {
+    filteredData.forEach((r) => {
       const key = (r.turma || '').trim();
       if (!key) return;
       if (!byTurma.has(key)) byTurma.set(key, []);
       byTurma.get(key)!.push(r);
     });
-
-    const ranges: string[] = Array.from(byTurma.entries()).map(([turma, rows]) => {
-      const { start, end } = deriveTrainingRange(rows);
-      return formatDateRange(start, end);
-    }).filter(Boolean);
-
+    const ranges: string[] = Array.from(byTurma.entries())
+      .map(([_, rows]) => {
+        const { start, end } = deriveTrainingRange(rows);
+        return formatDateRange(start, end);
+      })
+      .filter(Boolean) as string[];
     let periodosLabel = ranges.join(' • ');
-    if (ranges.length > 2) {
-      periodosLabel = `${ranges.slice(0, 2).join(' e ')} +${ranges.length - 2}`;
-    }
+    if (ranges.length > 2) periodosLabel = `${ranges.slice(0, 2).join(' e ')} +${ranges.length - 2}`;
 
-    // NPS combinado e zona (reutiliza lógica do gauge)
-    const cursoScores = filteredData.map(d => d.nps.npsCurso);
-    const marcaScores = filteredData.map(d => d.nps.npsMarca);
+    // NPS combinado e zona
+    const cursoScores = filteredData.map((d) => d.nps.npsCurso);
+    const marcaScores = filteredData.map((d) => d.nps.npsMarca);
     const cAll = calculateNPS([...cursoScores, ...marcaScores]);
     const npsPercent = Math.max(0, Math.min(100, Math.ceil(cAll.nps)));
     const npsZone = npsPercent >= 90
@@ -493,33 +419,46 @@ const Index = () => {
       ? 'Regular'
       : 'Crítico';
 
-    // Média geral
     const mediaGeral = Number(kpiData.mediaGeral.toFixed(1));
 
     // Taxa de recomendação da marca (promoters / total)
     const npsMarca = calculateNPS(marcaScores);
     const recomendacaoMarcaPct = npsMarca.total > 0 ? Math.ceil((npsMarca.promoters / npsMarca.total) * 100) : 0;
 
-    // Aproveitamento máximo (100% ou menções explícitas a "máximo"). Fallback: >=90%
-    const aproxIsMax = (txt: string | null) => {
-      if (!txt) return false;
-      const t = txt.toLowerCase();
-      const m = t.match(/(\d{1,3})\s*%/);
-      const v = m ? parseInt(m[1], 10) : null;
-      const hasMax = t.includes('aproveitamento max') || t.includes('máximo') || t.includes('maximo');
-      if (hasMax) return true;
-      if (v !== null) return v >= 100;
-      return false;
-    };
-    const aproxIsHigh = (txt: string | null) => {
-      if (!txt) return false;
-      const m = txt.match(/(\d{1,3})\s*%/);
-      const v = m ? parseInt(m[1], 10) : null;
-      return v !== null && v >= 90;
+    // Aproveitamento máximo (>=90%)
+    const percents = filteredData
+      .map((r) => r.nps.nivelAproveitamento || '')
+      .map((txt) => {
+        const m = txt.match(/(\d{1,3})\s*%/);
+        return m ? parseInt(m[1], 10) : null;
+      })
+      .filter((v): v is number => v !== null);
+    const maxCount = percents.filter((v) => v >= 90).length;
+    const aproveitamentoMaxPct = filteredData.length > 0 ? Math.ceil((maxCount / filteredData.length) * 100) : 0;
+
+    // Extrair carga horária do nome do curso (ex.: "16 horas", "16h")
+    const parseHours = (s: string) => {
+      const m = s.match(/(\d{1,3})\s*(?:h(?:oras?)?|horas?)/i);
+      return m ? parseInt(m[1], 10) : null;
     };
 
-    const maxCount = filteredData.filter(d => aproxIsMax(d.nps.nivelAproveitamento) || (!aproxIsMax(d.nps.nivelAproveitamento) && aproxIsHigh(d.nps.nivelAproveitamento))).length;
-    const aproveitamentoMaxPct = Math.ceil((maxCount / filteredData.length) * 100);
+    let cargaHorariaLabel = '—';
+    let totalHorasLabel = '—';
+
+    if (cursos.length === 1) {
+      const h = parseHours(cursos[0]);
+      if (h && h > 0) {
+        cargaHorariaLabel = `${h} horas`;
+        const turmasCount = turmas.length || 1;
+        totalHorasLabel = `${h * turmasCount} horas`;
+      }
+    } else if (cursos.length > 1) {
+      const hs = cursos.map(parseHours).filter((x): x is number => x !== null);
+      if (hs.length > 0) {
+        const total = hs.reduce((a, b) => a + b, 0);
+        totalHorasLabel = `${total} horas`;
+      }
+    }
 
     return {
       courseLabel,
@@ -536,157 +475,77 @@ const Index = () => {
     };
   }, [filteredData, kpiData.mediaGeral]);
 
-  // Pontos de Atenção e Melhorias (classificação com rótulo dinâmico)
+  // Pontos de Atenção e Melhorias
   const improvementBlocks = React.useMemo(() => {
-    type Category = 'Infraestrutura' | 'Formato do Curso' | 'Metodologia' | 'Comunicação e Didática' | 'Outros';
+    const blocks: { title: string; label: 'Problema identificado' | 'Feedback'; feedback: string; suggestion: string }[] = [];
+    if (filteredData.length === 0) return blocks;
 
-    const normalize = (s: string) =>
-      s
-        .toLowerCase()
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '');
-    const tokenize = (t: string) => t.split(/[^a-z0-9]+/).filter(Boolean);
-
-    // Vocabulário base (sem acentos)
-    const NEGATIVE = [
-      'falta','precisa','precisaria','poderia','melhorar','melhoria','ruim','pior','baixo','pouco','confuso',
-      'dific','dificil','lento','devagar','cansativo','cansar','entediante','entediar','barulho','ruido',
-      'problema','instavel','queda','oscilacao','atraso','demora','lotado','apertado','quebrado','falho','bug','trava'
-    ];
-    const STRONG_NEG_WORDS = ['problema','ruim','pior','quebrado','falho','bug','trava','cansativo'];
-    const PHRASE_STRONG_NEG = ['nao funciona','sem internet','muito cansativo','sem wifi','sem wi-fi'];
-    const POSITIVE_PHRASES = ['sem cansar','sem entediar','nao cansativo','nao entediante','nao e cansativo','nao e entediante'];
-    const NEGATORS = ['nao','sem','nunca'];
-    const POSITIVE = [
-      'excelente','otimo','bom','muito bom','maravilhoso','show','top','gostei','amei','parabens','perfeito','satisfeito','incrivel',
-      'bem','preparado','clareza','dinamico','didatica','didatico','engajado','organizado','conduzir','fluido','leve'
-    ];
-
-    const scoreText = (raw: string) => {
-      const t = normalize(raw);
-      let s = 0;
-      // Frases compostas muito negativas
-      PHRASE_STRONG_NEG.forEach(ph => { if (t.includes(ph)) s += 2; });
-      // Frases compostas positivas (ex.: "sem cansar")
-      POSITIVE_PHRASES.forEach(ph => { if (t.includes(ph)) s -= 2; });
-
-      const tokens = tokenize(t);
-      for (let i = 0; i < tokens.length; i++) {
-        const w = tokens[i];
-        // Palavras negativas com verificação de negação no contexto anterior (janela de 8)
-        if (NEGATIVE.some(k => w.startsWith(k))) {
-          let weight = STRONG_NEG_WORDS.some(k => w.startsWith(k)) ? 2 : 1;
-          const start = Math.max(0, i - 8);
-          const hasNegator = tokens.slice(start, i).some(tok => NEGATORS.includes(tok));
-          s += hasNegator ? -weight : weight;
-        }
-        // Palavras positivas
-        if (POSITIVE.some(k => w.startsWith(k))) {
-          s -= 1;
+    // 1) Menores médias por bloco
+    const av = kpiData.avaliacaoMedia;
+    const entries = [
+      { key: 'autoavaliacao', label: 'Autoavaliação', value: av.autoavaliacao },
+      { key: 'professor', label: 'Professor', value: av.professor },
+      { key: 'metodologia', label: 'Metodologia', value: av.metodologia },
+      { key: 'infraestrutura', label: 'Infraestrutura', value: av.infraestrutura },
+    ].filter((e) => typeof e.value === 'number' && !isNaN(e.value as number)) as Array<{ key: string; label: string; value: number }>;
+    const low = entries.filter((e) => e.value > 0 && e.value < 8.5).sort((a, b) => a.value - b.value).slice(0, 2);
+    low.forEach((e) => {
+      let suggestion = 'Elabore um plano de ação focado neste item para elevar a satisfação.';
+      if (e.key === 'metodologia') suggestion = 'Revisar didática e dinâmica das atividades, incluindo mais prática, cases e materiais de apoio.';
+      if (e.key === 'infraestrutura') suggestion = 'Checar salas, recursos multimídia e logística; garantir conforto e disponibilidade de equipamentos.';
+      if (e.key === 'autoavaliacao') suggestion = 'Alinhar expectativas, reforçar pré-requisitos e oferecer trilhas complementares para nivelamento.';
+      if (e.key === 'professor') {
+        // Subdimensões do professor – destacar a mais baixa
+        const subs: Array<{ k: string; v: number | null; label: string; tip: string }> = [
+          { k: 'didatica', v: professorMetrics.didatica, label: 'Didática e Comunicação', tip: 'Promover variação de métodos, clareza nos objetivos e feedbacks.' },
+          { k: 'aplicabilidade', v: professorMetrics.aplicabilidade, label: 'Aplicabilidade', tip: 'Conectar teoria à prática com exemplos e exercícios do contexto do público.' },
+          { k: 'relacionamento', v: professorMetrics.relacionamento, label: 'Relacionamento', tip: 'Ampliar interação, acolhimento e espaço para dúvidas.' },
+          { k: 'dominioAssunto', v: professorMetrics.dominioAssunto, label: 'Domínio do Assunto', tip: 'Reforçar materiais e preparar exemplos mais profundos.' },
+          { k: 'pontualidade', v: professorMetrics.pontualidade, label: 'Pontualidade', tip: 'Revisar cronograma e checkpoints de tempo em sala.' },
+        ];
+        const valid = subs.filter((s) => typeof s.v === 'number');
+        if (valid.length > 0) {
+          const minSub = valid.reduce((m, c) => (c.v! < (m.v ?? Infinity) ? c : m));
+          suggestion = `${minSub.label} abaixo do ideal. ${minSub.tip}`;
+        } else {
+          suggestion = 'Aprimorar didática, clareza e interação ao longo do curso.';
         }
       }
-      return s;
-    };
-
-    const classify = (text: string): { category: Category; title: string; suggestion: string } => {
-      const t = normalize(text);
-      const hasAny = (arr: string[]) => arr.some(k => t.includes(normalize(k)));
-
-      // Infraestrutura com subcategoria de Internet
-      const infraInternet = ['wifi','wi-fi','wireless','internet','conex','rede','banda','latencia','latência'];
-      if (hasAny([...infraInternet, 'infraestrutura','projetor','som','microfone','ar condicionado','climatiz','ilumina','acust','ventila','cadeira','mesa','equipament','sala'])) {
-        const isNet = hasAny(infraInternet);
-        return {
-          category: 'Infraestrutura',
-          title: isNet ? 'Infraestrutura de Internet' : 'Infraestrutura',
-          suggestion: isNet
-            ? 'Verificar e aprimorar a internet (ex.: conexão e banda) para garantir melhor experiência em sala.'
-            : 'Aprimorar a infraestrutura física e os equipamentos para melhorar a experiência dos participantes.',
-        };
-      }
-      if (hasAny(['formato','carga hor','horario','horário','cronograma','tempo','ritmo','dois dias','seguidos','cansativo','intenso','duracao','duração','semanas','módul','modul','intervalo','pausa'])) {
-        return {
-          category: 'Formato do Curso',
-          title: 'Formato do Curso',
-          suggestion: 'Reavaliar a distribuição de conteúdos e carga horária para reduzir cansaço e melhorar absorção.',
-        };
-      }
-      if (hasAny(['metodologia','dinamic','atividade','pratic','mao na massa','mão na massa','interativo','interacao','interação','exercicio','exercício','estudo de caso','participacao'])) {
-        return {
-          category: 'Metodologia',
-          title: 'Metodologia',
-          suggestion: 'Aumentar momentos práticos e dinâmicas que favoreçam a aplicação do conteúdo.',
-        };
-      }
-      if (hasAny(['comunicacao','comunicação','didatica','didática','clareza','explica','objetivo','velocidade','rápido','rapido','lento','exemplos','slides'])) {
-        return {
-          category: 'Comunicação e Didática',
-          title: 'Comunicação e Didática',
-          suggestion: 'Ajustar ritmo e clareza das explicações, reforçando exemplos e checkpoints de entendimento.',
-        };
-      }
-      return {
-        category: 'Outros',
-        title: 'Outros',
-        suggestion: 'Revisar este ponto com a equipe para propor uma melhoria específica.',
-      };
-    };
-
-    // Coletar candidatas: prioriza campo de melhorias; inclui outros textos somente quando há indícios claros de problema
-    type Cand = { text: string; turma: string; curso: string; score: number; title: string; suggestion: string };
-    const candidates: Cand[] = [];
-    const seen = new Set<string>();
-
-    filteredData.forEach(r => {
-      if (r.nps.melhorias && r.nps.melhorias.trim()) {
-        const raw = r.nps.melhorias.trim();
-        const key = normalize(raw);
-        const cls = classify(raw);
-        const score = scoreText(raw);
-        if (!seen.has(key)) {
-          candidates.push({ text: raw, turma: r.turma, curso: r.curso, score, title: cls.title, suggestion: cls.suggestion });
-          seen.add(key);
-        }
-      }
-      const maybe = [r.metodologia.feedback, r.avaliacaoProfessor.feedback, r.autoavaliacao.feedback];
-      maybe.forEach(t => {
-        if (t && t.trim()) {
-          const raw = t.trim();
-          const sc = scoreText(raw);
-          if (sc > 0 && !seen.has(normalize(raw))) {
-            const cls = classify(raw);
-            candidates.push({ text: raw, turma: r.turma, curso: r.curso, score: sc, title: cls.title, suggestion: cls.suggestion });
-            seen.add(normalize(raw));
-          }
-        }
+      blocks.push({
+        title: `${e.label} com média de ${e.value.toFixed(1)}`,
+        label: 'Problema identificado',
+        feedback: `Média de ${e.label.toLowerCase()} (${e.value.toFixed(1)}) ficou abaixo da meta (8,5).`,
+        suggestion,
       });
     });
 
-    if (candidates.length === 0) return [] as { title: string; label: 'Problema identificado' | 'Feedback'; feedback: string; suggestion: string }[];
+    // 2) NPS abaixo de referência
+    if (npsGauge.percent < 70) {
+      blocks.push({
+        title: 'NPS abaixo da zona de excelência',
+        label: 'Problema identificado',
+        feedback: `NPS combinado em ${npsGauge.percent}% (meta: 70%+).`,
+        suggestion: 'Realizar ações de encantamento (pós-curso, comunicação personalizada, facilitação de depoimentos) e investigação de detratores.',
+      });
+    }
 
-    // Agrupar por título de categoria
-    const grouped = new Map<string, Cand[]>();
-    candidates.forEach(c => {
-      const arr = grouped.get(c.title) || [];
-      arr.push(c);
-      grouped.set(c.title, arr);
+    // 3) Feedbacks de melhorias textuais (até 3)
+    const improvements = Array.from(new Set(
+      filteredData
+        .map((r) => (r.nps.melhorias || '').trim())
+        .filter((s) => s && s.length > 0)
+    )).slice(0, 3);
+    improvements.forEach((txt, i) => {
+      blocks.push({
+        title: `Melhoria sugerida #${i + 1}`,
+        label: 'Feedback',
+        feedback: txt,
+        suggestion: 'Incorporar ao plano de ação e acompanhar a execução com responsáveis e prazos.',
+      });
     });
 
-    // Seleciona até 3 categorias mais frequentes; em cada uma escolhe a frase com maior score (ou neutra se nenhuma >0)
-    const ordered = Array.from(grouped.entries())
-      .sort((a, b) => b[1].length - a[1].length)
-      .slice(0, 3)
-      .map(([title, items]) => {
-        const byScore = [...items].sort((a, b) => b.score - a.score);
-        const best = byScore[0];
-        const label: 'Problema identificado' | 'Feedback' = best.score > 0 ? 'Problema identificado' : 'Feedback';
-        // Sugestão coerente: se for Feedback (não-problema), trocar por uma sugestão neutra
-        const suggestion = label === 'Feedback' ? 'Registrar o feedback e manter as práticas que estão funcionando.' : best.suggestion;
-        return { title, label, feedback: best.text.replace(/^\"+|\"+$/g, ''), suggestion };
-      });
-
-    return ordered;
-  }, [filteredData]);
+    return blocks;
+  }, [filteredData, kpiData, npsGauge, professorMetrics]);
 
   if (surveyData.length === 0) {
     return (
@@ -737,9 +596,9 @@ const Index = () => {
 
   return (
     <DashboardLayout onExport={handleExport} hasData={true} onReset={handleReset}>
-      <div className="space-y-6">
+      <div id="print-root" className="space-y-6">
         {/* Status dos dados e filtros */}
-        <div className="flex flex-col lg:flex-row gap-4 items-start lg:items-center justify-between">
+        <div className="flex flex-col lg:flex-row gap-4 items-start lg:items-center justify-between" data-print-section>
           <div className="flex items-center space-x-4">
             <Badge variant="outline" className="text-sm">
               {surveyData.length} respostas totais
@@ -760,20 +619,24 @@ const Index = () => {
           )}
         </div>
 
-        {/* Painel de Filtros */}
-        <FilterPanel
-          data={surveyData}
-          filters={filters}
-          onFiltersChange={setFilters}
-        />
+        {/* Painel de Filtros - mantido visível, também exportado */}
+        <div data-print-section>
+          <FilterPanel
+            data={surveyData}
+            filters={filters}
+            onFiltersChange={setFilters}
+          />
+        </div>
 
         {filteredData.length > 0 ? (
           <>
             {/* KPIs */}
-            <KPICards data={kpiData} />
+            <div data-print-section>
+              <KPICards data={kpiData} />
+            </div>
 
             {/* Gráficos Principais */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6" data-print-section>
               <NPSChart 
                 npsCurso={npsData.npsCurso} 
                 npsMarca={npsData.npsMarca} 
@@ -782,8 +645,8 @@ const Index = () => {
             </div>
 
             {/* Comparativo entre Turmas */}
-            {turmasComparativo.length >= 2 && (
-              <Card className="border-primary/20 shadow-sm">
+            {turmasComparativo.length >= 1 && (
+              <Card className="border-primary/20 shadow-sm" data-print-section>
                 <div className="px-6 pt-6 pb-4 border-b">
                   <h2 className="text-2xl font-semibold leading-none tracking-tight">Comparativo entre Turmas</h2>
                   <p className="text-sm text-muted-foreground mt-1">Resumo por turma: participantes, média geral, NPS e foco total.</p>
@@ -824,7 +687,7 @@ const Index = () => {
              )}
 
              {/* Avaliação do Professor (substitui Evolução Temporal) */}
-             <Card className="border-primary/20 shadow-sm">
+             <Card className="border-primary/20 shadow-sm" data-print-section>
                <div className="px-6 pt-6">
                  <h2 className="text-2xl font-semibold leading-none tracking-tight">
                    Avaliação do Professor{professorMetrics.professorNome ? ` ${professorMetrics.professorNome}` : ''}
@@ -854,7 +717,7 @@ const Index = () => {
             </Card>
             
             {/* Net Promoter Score (NPS) - Gauge */}
-            <Card className="border-primary/20 shadow-sm mt-6">
+            <Card className="border-primary/20 shadow-sm mt-6" data-print-section>
               <div className="px-6 pt-6 pb-4 border-b">
                 
                  <h2 className="text-2xl font-semibold leading-none tracking-tight">Net Promoter Score (NPS)</h2>
@@ -919,15 +782,15 @@ const Index = () => {
             </Card>
 
             {/* Destaques dos Feedbacks */}
-            <Card className="border-primary/20 shadow-sm mt-6">
+            <Card className="border-primary/20 shadow-sm mt-6" data-print-section>
               <div className="px-6 pt-6 pb-4 border-b">
                 <h2 className="text-2xl font-semibold leading-none tracking-tight">Destaques dos Feedbacks</h2>
               </div>
               <CardContent className="pt-6">
                 {feedbackItems.length > 0 ? (
-                  <div className="max-h-80 overflow-y-auto pr-1">
+                  <div className="max-h-80 overflow-y-auto pr-1" data-print-expand>
                     <ul className="space-y-3">
-                      {feedbackItems.map((item, idx) => (
+                      {(isExporting ? feedbackItems.filter((f) => f.isPromoter && !f.isImprovement).slice(0, 5) : feedbackItems).map((item, idx) => (
                         <li key={idx} className="rounded-md bg-muted/50 dark:bg-muted/20 px-4 py-3 flex gap-3 items-start">
                           <span aria-hidden className="text-xl leading-none text-primary select-none">“</span>
                           <div>
@@ -945,7 +808,7 @@ const Index = () => {
             </Card>
 
             {/* Pontos de Atenção e Melhorias */}
-            <Card className="border-primary/20 shadow-sm mt-6">
+            <Card className="border-primary/20 shadow-sm mt-6" data-print-section>
               <div className="px-6 pt-6 pb-4 border-b">
                 <h2 className="text-2xl font-semibold leading-none tracking-tight">Pontos de Atenção e Melhorias</h2>
               </div>
@@ -961,8 +824,8 @@ const Index = () => {
                             <div className="mt-1 text-sm text-foreground/90 bg-background/70 rounded-md px-3 py-2">{blk.feedback}</div>
                           </div>
                           <div>
-                            <div className="text-sm font-medium text-foreground">Sugestão:</div>
-                            <div className="mt-1 text-sm text-muted-foreground">{blk.suggestion}</div>
+                            <div className="text-sm font-medium text-foreground">Ação sugerida:</div>
+                            <div className="mt-1 text-sm text-foreground/90 bg-background/70 rounded-md px-3 py-2">{blk.suggestion}</div>
                           </div>
                         </div>
                       </div>
@@ -975,7 +838,7 @@ const Index = () => {
             </Card>
 
             {/* Informações dos Cursos */}
-            <Card className="border-primary/20 shadow-sm mt-6">
+            <Card className="border-primary/20 shadow-sm mt-6" data-print-section>
               <div className="px-6 pt-6 pb-4 border-b flex items-center gap-2">
                 <BookOpen className="h-5 w-5 text-primary" />
                 <h2 className="text-2xl font-semibold leading-none tracking-tight">Informações dos Cursos</h2>
@@ -1039,7 +902,7 @@ const Index = () => {
             <CardContent className="flex items-center justify-center h-32">
               <div className="text-center">
                 <p className="text-muted-foreground">
-                  Nenhum dado corresponde aos filtros aplicados
+                  Nenhum resultado encontrado para os filtros aplicados.
                 </p>
               </div>
             </CardContent>
